@@ -24528,6 +24528,23 @@ function stringMap(value, name) {
   }
   return parsed;
 }
+function parseWebhookMap(value) {
+  if (!value.trim()) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("webhook_map must be a JSON object.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.values(parsed).some(
+    (v) => typeof v !== "string" && (!Array.isArray(v) || !v.length || v.some((x) => typeof x !== "string" || !x.trim()))
+  )) {
+    throw new Error(
+      "webhook_map values must be a webhook string or a non-empty list of webhook strings."
+    );
+  }
+  return parsed;
+}
 function parseLabels(value) {
   const text = value.trim();
   if (!text) throw new Error("labels must contain at least one label.");
@@ -24596,9 +24613,11 @@ async function notify(eventName, event, config, ports) {
   const prURL = new URL(pr.html_url);
   if (prURL.protocol !== "https:" || prURL.username || prURL.password)
     throw new Error("PR URL must be HTTPS.");
-  const webhook = Object.hasOwn(config.webhookMap, label) ? config.webhookMap[label] : config.slackWebhook;
-  if (!webhook) throw new Error("No webhook configured for this label.");
-  validateWebhook(webhook);
+  const route = Object.hasOwn(config.webhookMap, label) ? config.webhookMap[label] : config.slackWebhook;
+  const webhooks = [...new Set(Array.isArray(route) ? route : [route])];
+  if (!webhooks.length || webhooks.some((w) => !w))
+    throw new Error("No webhook configured for this label.");
+  for (const webhook of webhooks) validateWebhook(webhook);
   const text = render(config.template || DEFAULT_TEMPLATE, {
     label: escapeSlack(label),
     pr: String(pr.number),
@@ -24615,18 +24634,54 @@ async function notify(eventName, event, config, ports) {
   if (!text.trim() || text.length > 4e3)
     throw new Error("Rendered Slack message must contain 1-4000 characters.");
   const payload = { text };
-  if (config.dryRun) return { status: "dry-run", label, payload };
-  const key = (0, import_node_crypto.createHash)("sha256").update(JSON.stringify([repository, pr.number, label, webhook])).digest("hex");
+  if (config.dryRun)
+    return { status: "dry-run", label, payload, destinations: webhooks.length };
+  const comments = config.dedup ? await ports.comments() : [];
+  let posted = 0, deduplicated = 0, pending = 0;
+  const failures = [];
+  for (const webhook of webhooks) {
+    try {
+      const status = await sendOne(
+        repository,
+        pr.number,
+        label,
+        webhook,
+        payload,
+        config.dedup,
+        comments,
+        ports
+      );
+      if (status === "posted") posted++;
+      else if (status === "deduplicated") deduplicated++;
+      else pending++;
+    } catch (error2) {
+      failures.push(error2);
+    }
+  }
+  if (failures.length) {
+    if (webhooks.length === 1) throw failures[0];
+    throw new Error(
+      `Slack fan-out incomplete: ${posted} posted, ${deduplicated} already sent, ${pending} pending review, ${failures.length} failed. Check destination channels and pending markers before retrying. Successful destinations will be skipped on retry with dedup enabled.`
+    );
+  }
+  return {
+    status: pending ? "pending-review" : posted ? "posted" : "deduplicated",
+    label,
+    destinations: webhooks.length,
+    posted,
+    deduplicated,
+    pending
+  };
+}
+async function sendOne(repository, prNumber, label, webhook, payload, dedup, comments, ports) {
+  const key = (0, import_node_crypto.createHash)("sha256").update(JSON.stringify([repository, prNumber, label, webhook])).digest("hex");
   let commentId;
-  if (config.dedup) {
-    const prior = (await ports.comments()).find(
+  if (dedup) {
+    const prior = comments.find(
       (c) => ports.trustedAuthors.includes(c.author) && [marker(key, "pending"), marker(key, "sent")].includes(c.body)
     );
     if (prior)
-      return {
-        status: prior.body === marker(key, "sent") ? "deduplicated" : "pending-review",
-        label
-      };
+      return prior.body === marker(key, "sent") ? "deduplicated" : "pending-review";
     commentId = await ports.createComment(marker(key, "pending"));
   }
   try {
@@ -24652,7 +24707,7 @@ async function notify(eventName, event, config, ports) {
       );
     }
   }
-  return { status: "posted", label };
+  return "posted";
 }
 
 // src/index.ts
@@ -24662,8 +24717,10 @@ async function run() {
     const rawMap = getInput("webhook_map");
     if (slackWebhook) setSecret(slackWebhook);
     if (rawMap) setSecret(rawMap);
-    const webhookMap = stringMap(rawMap, "webhook_map");
-    for (const url of Object.values(webhookMap)) if (url) setSecret(url);
+    const webhookMap = parseWebhookMap(rawMap);
+    for (const route of Object.values(webhookMap))
+      for (const url of Array.isArray(route) ? route : [route])
+        if (url) setSecret(url);
     const dryRun = parseBoolean(getInput("dry_run"), "dry_run");
     const dedup = parseBoolean(getInput("dedup"), "dedup");
     const labels = parseLabels(getInput("labels", { required: true }));
@@ -24764,13 +24821,19 @@ async function run() {
     );
     setOutput("status", result.status);
     setOutput("label", result.label || "");
+    setOutput("destinations", result.destinations || 0);
+    setOutput("posted", result.posted || 0);
+    setOutput("deduplicated", result.deduplicated || 0);
+    setOutput("pending", result.pending || 0);
     info(`Notification status: ${result.status}`);
     if (result.status === "pending-review")
       warning(
         "An earlier run left a pending marker. Check Slack before removing that marker and retrying."
       );
     if (result.status === "dry-run")
-      info(`Dry-run payload: ${JSON.stringify(result.payload)}`);
+      info(
+        `Dry-run destinations: ${result.destinations}; payload: ${JSON.stringify(result.payload)}`
+      );
   } catch (error2) {
     const message = error2 instanceof Error ? error2.message : "Notification failed.";
     const safe = /^(labels|mention_map|webhook_map|dedup|dry_run|message|Rendered|Unknown message|Invalid Slack|Use an HTTPS|No webhook|Incomplete|PR URL|Slack|Unexpected Slack|github_token|Unable to verify)/.test(

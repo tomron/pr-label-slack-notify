@@ -5,6 +5,7 @@ import {
   parseBoolean,
   parseLabels,
   stringMap,
+  parseWebhookMap,
   RejectedPost,
   type LabelEvent,
 } from "./notify.js";
@@ -16,8 +17,10 @@ export async function run(): Promise<void> {
     // Mask even invalid secret JSON before attempting validation.
     if (slackWebhook) core.setSecret(slackWebhook);
     if (rawMap) core.setSecret(rawMap);
-    const webhookMap = stringMap(rawMap, "webhook_map");
-    for (const url of Object.values(webhookMap)) if (url) core.setSecret(url);
+    const webhookMap = parseWebhookMap(rawMap);
+    for (const route of Object.values(webhookMap))
+      for (const url of Array.isArray(route) ? route : [route])
+        if (url) core.setSecret(url);
     const dryRun = parseBoolean(core.getInput("dry_run"), "dry_run");
     const dedup = parseBoolean(core.getInput("dedup"), "dedup");
     const labels = parseLabels(core.getInput("labels", { required: true }));
@@ -134,13 +137,19 @@ export async function run(): Promise<void> {
     );
     core.setOutput("status", result.status);
     core.setOutput("label", result.label || "");
+    core.setOutput("destinations", result.destinations || 0);
+    core.setOutput("posted", result.posted || 0);
+    core.setOutput("deduplicated", result.deduplicated || 0);
+    core.setOutput("pending", result.pending || 0);
     core.info(`Notification status: ${result.status}`);
     if (result.status === "pending-review")
       core.warning(
         "An earlier run left a pending marker. Check Slack before removing that marker and retrying.",
       );
     if (result.status === "dry-run")
-      core.info(`Dry-run payload: ${JSON.stringify(result.payload)}`);
+      core.info(
+        `Dry-run destinations: ${result.destinations}; payload: ${JSON.stringify(result.payload)}`,
+      );
   } catch (error) {
     // Never surface raw SDK/network errors: those may contain authorization headers or webhook URLs.
     const message =

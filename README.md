@@ -1,6 +1,6 @@
 # PR label Slack notifier
 
-A GitHub Action that sends a Slack message when a configured label is added to a pull request. Use one incoming webhook for a single channel, or a secret label-to-webhook map for multiple channels.
+A GitHub Action that sends a Slack message when a configured label is added to a pull request. Use one incoming webhook for a single channel, or a secret label-to-webhook map for multiple channels. One label can fan out to several channels by listing one webhook for each.
 
 - Custom message templates with separate PR author and labeler fields.
 - GitHub-to-Slack mention mapping for either person.
@@ -44,11 +44,16 @@ Use `pull_request_target` for fork PRs: it runs in the base repository where the
 
 ## Multiple channels
 
+One label can notify several channels. Each channel still needs its own webhook; the action sends the same message to every unique URL in the list. Single-webhook map values remain supported.
+
 Modern Slack incoming webhooks cannot override their channel. Create a webhook for each channel and put the entire map in a repository secret named `SLACK_WEBHOOK_MAP`:
 
 ```json
 {
-  "release-ready": "<incoming webhook URL for release channel>",
+  "release-ready": [
+    "<incoming webhook URL for release channel>",
+    "<incoming webhook URL for engineering channel>"
+  ],
   "needs-review": "<incoming webhook URL for review channel>"
 }
 ```
@@ -66,7 +71,7 @@ Then use this step with the same event, permissions and concurrency as above:
     dry_run: "false"
 ```
 
-A map entry wins over the default webhook. A matching label without either route fails before sending. Exact labels are case-sensitive. Comma/newline lists and JSON arrays are supported; use JSON for a label containing a comma.
+A map entry wins over the default webhook; the fallback is not added to a list. Empty lists are invalid. Duplicate URLs within a list are sent only once. All selected URLs are validated before any delivery. A matching label without either route fails before sending. Exact labels are case-sensitive. Comma/newline lists and JSON arrays are supported; use JSON for a label containing a comma.
 
 Webhook URLs are credentials. Never put them in workflow files, comments or public examples. Slack and GovSlack HTTPS incoming webhook hosts are supported; redirects and arbitrary destinations are rejected.
 
@@ -76,7 +81,7 @@ Webhook URLs are credentials. Never put them in workflow files, comments or publ
 | ------------------ | --------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `slack_webhook`    | Empty                 | Default incoming webhook, supplied as a secret.                                                                    |
 | `labels`           | Required              | Exact label names as JSON array or comma/newline list.                                                             |
-| `webhook_map`      | Empty                 | Secret JSON object mapping labels to incoming webhook URLs.                                                        |
+| `webhook_map`      | Empty                 | Secret JSON object mapping labels to a webhook URL or a non-empty list of URLs.                                    |
 | `dedup`            | `true`                | One notification per PR, label and webhook destination.                                                            |
 | `github_token`     | `${{ github.token }}` | Comment token. Requires `pull-requests: write` with dedup. A personal token's user identity is verified when used. |
 | `message_template` | Example above         | Slack text with the placeholders below.                                                                            |
@@ -105,6 +110,8 @@ The template is trusted workflow configuration. Event fields are escaped for Sla
 
 With `dedup: true`, a bot-owned hidden PR comment stores a fixed marker with a SHA-256 key for the repository, PR, label and webhook. Raw webhook URLs are never stored in comments. Markers from other contributors are ignored. Changing a webhook creates a new destination and therefore a new dedup key. Removing and re-adding the same label to the same destination does not post again.
 
+Each destination has its own marker, so retrying a partially successful fan-out skips channels that already received the message. Adding a channel later does not resend to existing channels. Destinations are processed sequentially and independent destinations still run if one fails; any failure makes the action fail with a count summary (never raw URLs). Pending destinations require review. With `dedup: false`, rerunning a partial failure resends to all channels.
+
 The marker is `pending` before delivery, then `sent` after Slack confirms `ok`. Hidden means the comment body is an HTML comment, not that it is private: GitHub still records the comment and may show activity. Deleting a marker can allow another notification.
 
 **Keep the workflow concurrency group in the examples.** Comment check/create is not an atomic operation; without concurrency, simultaneous runs can double-post. The group is per PR **and label**, so different labels do not replace one another in GitHub's pending-run slot. GitHub may collapse repeated pending runs for the same label, which is consistent with dedup. If every addition must notify, set `dedup: false` and remove concurrency; no comment permission is then needed.
@@ -119,6 +126,8 @@ Set `dry_run: "true"` to log the rendered `{ "text": "..." }` payload without po
 
 - `status`: `posted`, `dry-run`, `deduplicated`, `pending-review`, `skipped-event`, or `skipped-label`.
 - `label`: matched label, when applicable.
+- `destinations`: number of unique selected webhook URLs (also available in dry run).
+- `posted`, `deduplicated`, `pending`: per-destination counts on completed runs. A failed fan-out reports counts in its safe error message.
 
 Only `labeled` PR events are handled. No `opened`, `unlabeled`, rich styles, configurable marker, bot-token channel override or automatic threading. Incoming webhooks support replies only with an already-known message timestamp, which they do not return; this webhook-only action intentionally does not offer automatic threading.
 

@@ -171,3 +171,13 @@ describe("runner", () => {
     );
   });
 });
+
+it("masks each fan-out URL and exposes counts", async () => {
+  const second = hook.replace("BDEMO", "BOTHER");
+  mocks.inputs.webhook_map = JSON.stringify({ ready: [hook, second] });
+  await run();
+  expect(mocks.secret).toHaveBeenCalledWith(second);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(mocks.output).toHaveBeenCalledWith("destinations", 2);
+  expect(mocks.output).toHaveBeenCalledWith("posted", 2);
+});

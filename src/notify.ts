@@ -5,7 +5,7 @@ export const DEFAULT_TEMPLATE =
 export interface Config {
   labels: string[];
   slackWebhook: string;
-  webhookMap: Record<string, string>;
+  webhookMap: Record<string, string | string[]>;
   mentionMap: Record<string, string>;
   template: string;
   dedup: boolean;
@@ -59,6 +59,34 @@ export function stringMap(value: string, name: string): Record<string, string> {
     throw new Error(`${name} must map strings to strings.`);
   }
   return parsed as Record<string, string>;
+}
+export function parseWebhookMap(
+  value: string,
+): Record<string, string | string[]> {
+  if (!value.trim()) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("webhook_map must be a JSON object.");
+  }
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    Object.values(parsed).some(
+      (v) =>
+        typeof v !== "string" &&
+        (!Array.isArray(v) ||
+          !v.length ||
+          v.some((x) => typeof x !== "string" || !x.trim())),
+    )
+  ) {
+    throw new Error(
+      "webhook_map values must be a webhook string or a non-empty list of webhook strings.",
+    );
+  }
+  return parsed as Record<string, string | string[]>;
 }
 export function parseLabels(value: string): string[] {
   const text = value.trim();
@@ -165,11 +193,14 @@ export async function notify(
   const prURL = new URL(pr.html_url);
   if (prURL.protocol !== "https:" || prURL.username || prURL.password)
     throw new Error("PR URL must be HTTPS.");
-  const webhook = Object.hasOwn(config.webhookMap, label)
+  const route = Object.hasOwn(config.webhookMap, label)
     ? config.webhookMap[label]!
     : config.slackWebhook;
-  if (!webhook) throw new Error("No webhook configured for this label.");
-  validateWebhook(webhook);
+  const webhooks = [...new Set(Array.isArray(route) ? route : [route])];
+  if (!webhooks.length || webhooks.some((w) => !w))
+    throw new Error("No webhook configured for this label.");
+  // Validate all destinations before any side effect, including the first post.
+  for (const webhook of webhooks) validateWebhook(webhook);
   const text = render(config.template || DEFAULT_TEMPLATE, {
     label: escapeSlack(label),
     pr: String(pr.number),
@@ -186,25 +217,71 @@ export async function notify(
   if (!text.trim() || text.length > 4000)
     throw new Error("Rendered Slack message must contain 1-4000 characters.");
   const payload = { text };
-  if (config.dryRun) return { status: "dry-run", label, payload };
+  if (config.dryRun)
+    return { status: "dry-run", label, payload, destinations: webhooks.length };
+  const comments = config.dedup ? await ports.comments() : [];
+  let posted = 0,
+    deduplicated = 0,
+    pending = 0;
+  const failures: unknown[] = [];
+  for (const webhook of webhooks) {
+    try {
+      const status = await sendOne(
+        repository,
+        pr.number,
+        label,
+        webhook,
+        payload,
+        config.dedup,
+        comments,
+        ports,
+      );
+      if (status === "posted") posted++;
+      else if (status === "deduplicated") deduplicated++;
+      else pending++;
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length) {
+    if (webhooks.length === 1) throw failures[0];
+    throw new Error(
+      `Slack fan-out incomplete: ${posted} posted, ${deduplicated} already sent, ${pending} pending review, ${failures.length} failed. Check destination channels and pending markers before retrying. Successful destinations will be skipped on retry with dedup enabled.`,
+    );
+  }
+  return {
+    status: pending ? "pending-review" : posted ? "posted" : "deduplicated",
+    label,
+    destinations: webhooks.length,
+    posted,
+    deduplicated,
+    pending,
+  };
+}
+async function sendOne(
+  repository: string,
+  prNumber: number,
+  label: string,
+  webhook: string,
+  payload: { text: string },
+  dedup: boolean,
+  comments: Comment[],
+  ports: Ports,
+) {
   const key = createHash("sha256")
-    .update(JSON.stringify([repository, pr.number, label, webhook]))
+    .update(JSON.stringify([repository, prNumber, label, webhook]))
     .digest("hex");
   let commentId: number | undefined;
-  if (config.dedup) {
-    const prior = (await ports.comments()).find(
+  if (dedup) {
+    const prior = comments.find(
       (c) =>
         ports.trustedAuthors.includes(c.author) &&
         [marker(key, "pending"), marker(key, "sent")].includes(c.body),
     );
     if (prior)
-      return {
-        status:
-          prior.body === marker(key, "sent")
-            ? "deduplicated"
-            : "pending-review",
-        label,
-      };
+      return prior.body === marker(key, "sent")
+        ? "deduplicated"
+        : "pending-review";
     commentId = await ports.createComment(marker(key, "pending"));
   }
   try {
@@ -230,5 +307,5 @@ export async function notify(
       );
     }
   }
-  return { status: "posted", label };
+  return "posted";
 }

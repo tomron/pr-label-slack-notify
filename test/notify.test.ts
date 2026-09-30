@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   notify,
+  parseWebhookMap,
   DEFAULT_TEMPLATE,
   escapeSlack,
   marker,
@@ -386,4 +387,99 @@ describe("notifications", () => {
     expect(marker("abc", "sent")).toBe(
       "<!-- pr-label-slack-notify:v1 abc sent -->",
     ));
+});
+
+describe("webhook fan-out", () => {
+  it("parses strings and lists together", () =>
+    expect(
+      parseWebhookMap(JSON.stringify({ a: hook, b: [hook, hook2] })),
+    ).toEqual({ a: hook, b: [hook, hook2] }));
+  it.each([
+    "[]",
+    "null",
+    "bad",
+    '{"a":[]}',
+    '{"a":[1]}',
+    '{"a":[""]}',
+    '{"a":1}',
+  ])("rejects invalid route map %s", (value) =>
+    expect(() => parseWebhookMap(value)).toThrow(),
+  );
+  it("posts to all channels once and deduplicates each separately", async () => {
+    const { ports, stored } = setup();
+    const c = { ...config, webhookMap: { ready: [hook, hook2, hook] } };
+    const r = await notify("pull_request", event, c, ports);
+    expect(r.destinations).toBe(2);
+    expect(r.posted).toBe(2);
+    expect(ports.post).toHaveBeenCalledTimes(2);
+    expect(stored).toHaveLength(2);
+    const again = await notify("pull_request", event, c, ports);
+    expect(again.status).toBe("deduplicated");
+    expect(again.deduplicated).toBe(2);
+    expect(ports.post).toHaveBeenCalledTimes(2);
+  });
+  it("validates all channels before any effect", async () => {
+    const { ports } = setup();
+    await expect(
+      notify(
+        "pull_request",
+        event,
+        { ...config, webhookMap: { ready: [hook, "https://evil.example"] } },
+        ports,
+      ),
+    ).rejects.toThrow();
+    expect(ports.comments).not.toHaveBeenCalled();
+    expect(ports.post).not.toHaveBeenCalled();
+  });
+  it("dry run counts unique destinations without effects", async () => {
+    const { ports } = setup();
+    const r = await notify(
+      "pull_request",
+      event,
+      { ...config, dryRun: true, webhookMap: { ready: [hook, hook2, hook] } },
+      ports,
+    );
+    expect(r.destinations).toBe(2);
+    expect(r.status).toBe("dry-run");
+    expect(ports.post).not.toHaveBeenCalled();
+  });
+  it("partial definite rejection retries only the failed channel", async () => {
+    const { ports } = setup();
+    const c = { ...config, webhookMap: { ready: [hook, hook2] } };
+    vi.mocked(ports.post).mockRejectedValueOnce(new RejectedPost("reject"));
+    await expect(notify("pull_request", event, c, ports)).rejects.toThrow(
+      "fan-out incomplete: 1 posted",
+    );
+    expect(ports.post).toHaveBeenCalledTimes(2);
+    const r = await notify("pull_request", event, c, ports);
+    expect(r.posted).toBe(1);
+    expect(r.deduplicated).toBe(1);
+    expect(ports.post).toHaveBeenCalledTimes(3);
+  });
+  it("uncertain channel keeps its pending marker while other channels post", async () => {
+    const { ports } = setup();
+    const c = { ...config, webhookMap: { ready: [hook, hook2] } };
+    vi.mocked(ports.post).mockRejectedValueOnce(new Error("network"));
+    await expect(notify("pull_request", event, c, ports)).rejects.toThrow(
+      "fan-out incomplete",
+    );
+    const r = await notify("pull_request", event, c, ports);
+    expect(r.status).toBe("pending-review");
+    expect(r.pending).toBe(1);
+    expect(r.deduplicated).toBe(1);
+    expect(ports.post).toHaveBeenCalledTimes(2);
+  });
+  it("adding a new channel does not resend previous channels", async () => {
+    const { ports } = setup();
+    await notify("pull_request", event, config, ports);
+    const r = await notify(
+      "pull_request",
+      event,
+      { ...config, webhookMap: { ready: [hook, hook2] } },
+      ports,
+    );
+    expect(r.posted).toBe(1);
+    expect(r.deduplicated).toBe(1);
+    expect(ports.post).toHaveBeenCalledTimes(2);
+  });
 });

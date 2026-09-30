@@ -9,7 +9,7 @@ inputs:
     description: Exact label names as a JSON array, comma-separated list or newline-separated list.
     required: true
   webhook_map:
-    description: JSON object mapping label names to webhook URLs. Store the entire object in a GitHub secret; one webhook per channel.
+    description: JSON object mapping label names to a webhook URL or a non-empty list of webhook URLs. Store the entire object in a GitHub secret; one webhook per channel.
     required: false
   dedup:
     description: Suppress repeat notifications for each PR, label and webhook using a trusted hidden comment marker. Requires write permission and workflow concurrency.
@@ -31,6 +31,14 @@ outputs:
     description: posted, dry-run, deduplicated, pending-review, skipped-event or skipped-label.
   label:
     description: Matched label, if any.
+  destinations:
+    description: Number of unique webhook destinations for the matched label.
+  posted:
+    description: Number of destinations newly notified.
+  deduplicated:
+    description: Number of destinations already sent.
+  pending:
+    description: Number of destinations requiring review of an uncertain earlier delivery.
 runs:
   using: node24
   main: dist/index.js
