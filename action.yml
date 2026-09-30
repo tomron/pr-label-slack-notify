@@ -1,0 +1,39 @@
+name: PR label Slack notifier
+description: Send Slack incoming-webhook notifications when configured PR labels are added, with mentions and hidden-comment deduplication.
+author: Tom Ron
+inputs:
+  slack_webhook:
+    description: Default Slack incoming webhook URL. Store in a GitHub secret. Optional when webhook_map covers every configured label.
+    required: false
+  labels:
+    description: Exact label names as a JSON array, comma-separated list or newline-separated list.
+    required: true
+  webhook_map:
+    description: JSON object mapping label names to webhook URLs. Store the entire object in a GitHub secret; one webhook per channel.
+    required: false
+  dedup:
+    description: Suppress repeat notifications for each PR, label and webhook using a trusted hidden comment marker. Requires write permission and workflow concurrency.
+    default: "true"
+  github_token:
+    description: GitHub token with pull-requests write permission for hidden comment markers. Unused with dedup false or dry_run true.
+    default: ${{ github.token }}
+  message_template:
+    description: Message with placeholders label, pr, title, url, repository, author/pr_author, labeler, author_mention/pr_author_mention and labeler_mention.
+    required: false
+  mention_map:
+    description: JSON object mapping GitHub usernames to Slack member IDs (U... or W...), not display names.
+    required: false
+  dry_run:
+    description: Log the rendered payload without posting to Slack or reading/writing GitHub comments.
+    default: "false"
+outputs:
+  status:
+    description: posted, dry-run, deduplicated, pending-review, skipped-event or skipped-label.
+  label:
+    description: Matched label, if any.
+runs:
+  using: node24
+  main: dist/index.js
+branding:
+  icon: message-square
+  color: purple
