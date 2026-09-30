@@ -24547,11 +24547,12 @@ function parseWebhookMap(value) {
   }
   return parsed;
 }
+var JSON_ARRAY_START = /^\[\s*("|\]|(true|false|null)\b|-?\d)/;
 function parseLabels(value) {
   const text = value.trim();
   if (!text) throw new UserError("labels must contain at least one label.");
   let labels;
-  if (/^\[\s*("|\]|(true|false|null)\b|-?\d)/.test(text)) {
+  if (JSON_ARRAY_START.test(text)) {
     try {
       labels = JSON.parse(text);
     } catch {
@@ -24581,7 +24582,7 @@ function escapeSlack(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 function render(template, values) {
-  return template.replace(/\{(\w+)\}/g, (_, key) => {
+  return template.replace(/\{([a-z_]+)\}/g, (_, key) => {
     if (!Object.hasOwn(values, key))
       throw new UserError(`Unknown message placeholder: {${key}}.`);
     return values[key];
@@ -24640,8 +24641,7 @@ async function notify(eventName, event, config, ports) {
   const payload = { text };
   if (config.dryRun)
     return { status: "dry-run", label, payload, destinations: webhooks.length };
-  const comments = config.dedup ? await ports.comments() : [];
-  const trusted = config.dedup ? await ports.trustedAuthors() : [];
+  const [comments, trusted] = config.dedup ? await Promise.all([ports.comments(), ports.trustedAuthors()]) : [[], []];
   let posted = 0, deduplicated = 0, pending = 0;
   const failures = [];
   for (const [index, webhook] of webhooks.entries()) {

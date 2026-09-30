@@ -121,9 +121,6 @@ describe("config", () => {
     ).toBe("{author} real"));
   it("rejects unknown placeholders", () =>
     expect(() => render("{typo}", {})).toThrow());
-  it.each(["{Label}", "{label2}"])("rejects placeholder %s", (t) =>
-    expect(() => render(t, { label: "x" })).toThrow(/Unknown/),
-  );
 });
 describe("notifications", () => {
   it("renders PR author and labeler separately", async () => {

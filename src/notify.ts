@@ -90,11 +90,13 @@ export function parseWebhookMap(
   }
   return parsed as Record<string, string | string[]>;
 }
+// Plain lists may contain labels such as "[WIP]", so only JSON-looking input is parsed as JSON.
+const JSON_ARRAY_START = /^\[\s*("|\]|(true|false|null)\b|-?\d)/;
 export function parseLabels(value: string): string[] {
   const text = value.trim();
   if (!text) throw new UserError("labels must contain at least one label.");
   let labels: unknown;
-  if (/^\[\s*("|\]|(true|false|null)\b|-?\d)/.test(text)) {
+  if (JSON_ARRAY_START.test(text)) {
     try {
       labels = JSON.parse(text);
     } catch {
@@ -146,7 +148,7 @@ export function render(
   template: string,
   values: Record<string, string>,
 ): string {
-  return template.replace(/\{(\w+)\}/g, (_, key: string) => {
+  return template.replace(/\{([a-z_]+)\}/g, (_, key: string) => {
     if (!Object.hasOwn(values, key))
       throw new UserError(`Unknown message placeholder: {${key}}.`);
     return values[key]!;
@@ -232,8 +234,9 @@ export async function notify(
   const payload = { text };
   if (config.dryRun)
     return { status: "dry-run", label, payload, destinations: webhooks.length };
-  const comments = config.dedup ? await ports.comments() : [];
-  const trusted = config.dedup ? await ports.trustedAuthors() : [];
+  const [comments, trusted] = config.dedup
+    ? await Promise.all([ports.comments(), ports.trustedAuthors()])
+    : [[], []];
   let posted = 0,
     deduplicated = 0,
     pending = 0;
