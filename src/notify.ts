@@ -29,18 +29,20 @@ export interface Comment {
   author: string;
 }
 export interface Ports {
-  trustedAuthors: string[];
+  trustedAuthors(): Promise<string[]>;
   comments(): Promise<Comment[]>;
   createComment(body: string): Promise<number>;
   updateComment(id: number, body: string): Promise<void>;
   deleteComment(id: number): Promise<void>;
   post(webhook: string, payload: { text: string }): Promise<void>;
 }
-export class RejectedPost extends Error {}
+/** Errors whose messages are safe to show in the workflow log. */
+export class UserError extends Error {}
+export class RejectedPost extends UserError {}
 export function parseBoolean(value: string, name: string): boolean {
   if (value === "true") return true;
   if (value === "false") return false;
-  throw new Error(`${name} must be true or false.`);
+  throw new UserError(`${name} must be true or false.`);
 }
 export function stringMap(value: string, name: string): Record<string, string> {
   if (!value.trim()) return {};
@@ -48,7 +50,7 @@ export function stringMap(value: string, name: string): Record<string, string> {
   try {
     parsed = JSON.parse(value);
   } catch {
-    throw new Error(`${name} must be a JSON object.`);
+    throw new UserError(`${name} must be a JSON object.`);
   }
   if (
     !parsed ||
@@ -56,7 +58,7 @@ export function stringMap(value: string, name: string): Record<string, string> {
     Array.isArray(parsed) ||
     Object.values(parsed).some((v) => typeof v !== "string")
   ) {
-    throw new Error(`${name} must map strings to strings.`);
+    throw new UserError(`${name} must map strings to strings.`);
   }
   return parsed as Record<string, string>;
 }
@@ -68,7 +70,7 @@ export function parseWebhookMap(
   try {
     parsed = JSON.parse(value);
   } catch {
-    throw new Error("webhook_map must be a JSON object.");
+    throw new UserError("webhook_map must be a JSON object.");
   }
   if (
     !parsed ||
@@ -82,7 +84,7 @@ export function parseWebhookMap(
           v.some((x) => typeof x !== "string" || !x.trim())),
     )
   ) {
-    throw new Error(
+    throw new UserError(
       "webhook_map values must be a webhook string or a non-empty list of webhook strings.",
     );
   }
@@ -90,13 +92,13 @@ export function parseWebhookMap(
 }
 export function parseLabels(value: string): string[] {
   const text = value.trim();
-  if (!text) throw new Error("labels must contain at least one label.");
+  if (!text) throw new UserError("labels must contain at least one label.");
   let labels: unknown;
-  if (text.startsWith("[")) {
+  if (/^\[\s*("|\]|(true|false|null)\b|-?\d)/.test(text)) {
     try {
       labels = JSON.parse(text);
     } catch {
-      throw new Error("labels JSON is invalid.");
+      throw new UserError("labels JSON is invalid.");
     }
   } else
     labels = text
@@ -108,7 +110,7 @@ export function parseLabels(value: string): string[] {
     !labels.length ||
     labels.some((s) => typeof s !== "string" || !s.trim())
   ) {
-    throw new Error("labels must be a list of non-empty strings.");
+    throw new UserError("labels must be a list of non-empty strings.");
   }
   return [...new Set(labels as string[])];
 }
@@ -117,7 +119,7 @@ export function validateWebhook(value: string): void {
   try {
     url = new URL(value);
   } catch {
-    throw new Error("Invalid Slack incoming webhook URL.");
+    throw new UserError("Invalid Slack incoming webhook URL.");
   }
   if (
     url.protocol !== "https:" ||
@@ -129,7 +131,7 @@ export function validateWebhook(value: string): void {
     url.hash ||
     !/^\/services\/[^/]+\/[^/]+\/[^/]+$/.test(url.pathname)
   ) {
-    throw new Error(
+    throw new UserError(
       "Use an HTTPS Slack incoming webhook URL on hooks.slack.com or hooks.slack-gov.com.",
     );
   }
@@ -144,9 +146,9 @@ export function render(
   template: string,
   values: Record<string, string>,
 ): string {
-  return template.replace(/\{([a-z_]+)\}/g, (_, key: string) => {
+  return template.replace(/\{(\w+)\}/g, (_, key: string) => {
     if (!Object.hasOwn(values, key))
-      throw new Error(`Unknown message placeholder: {${key}}.`);
+      throw new UserError(`Unknown message placeholder: {${key}}.`);
     return values[key]!;
   });
 }
@@ -154,7 +156,7 @@ function mention(login: string, map: Record<string, string>): string {
   const id = Object.hasOwn(map, login) ? map[login]! : undefined;
   if (!id) return escapeSlack(login);
   if (!/^[UW][A-Z0-9]+$/.test(id))
-    throw new Error(
+    throw new UserError(
       "mention_map values must be Slack member IDs (U... or W...), not display names.",
     );
   return `<@${id}>`;
@@ -162,12 +164,21 @@ function mention(login: string, map: Record<string, string>): string {
 export function marker(key: string, state: "pending" | "sent"): string {
   return `<!-- pr-label-slack-notify:v1 ${key} ${state} -->`;
 }
+export interface NotifyResult {
+  status: string;
+  label?: string;
+  payload?: { text: string };
+  destinations?: number;
+  posted?: number;
+  deduplicated?: number;
+  pending?: number;
+}
 export async function notify(
   eventName: string,
   event: LabelEvent,
   config: Config,
   ports: Ports,
-) {
+): Promise<NotifyResult> {
   if (
     !["pull_request", "pull_request_target"].includes(eventName) ||
     event.action !== "labeled" ||
@@ -188,17 +199,17 @@ export async function notify(
     !Number.isSafeInteger(pr.number) ||
     pr.number < 1
   ) {
-    throw new Error("Incomplete pull request event.");
+    throw new UserError("Incomplete pull request event.");
   }
   const prURL = new URL(pr.html_url);
   if (prURL.protocol !== "https:" || prURL.username || prURL.password)
-    throw new Error("PR URL must be HTTPS.");
+    throw new UserError("PR URL must be HTTPS.");
   const route = Object.hasOwn(config.webhookMap, label)
     ? config.webhookMap[label]!
     : config.slackWebhook;
   const webhooks = [...new Set(Array.isArray(route) ? route : [route])];
   if (!webhooks.length || webhooks.some((w) => !w))
-    throw new Error("No webhook configured for this label.");
+    throw new UserError("No webhook configured for this label.");
   // Validate all destinations before any side effect, including the first post.
   for (const webhook of webhooks) validateWebhook(webhook);
   const text = render(config.template || DEFAULT_TEMPLATE, {
@@ -215,16 +226,19 @@ export async function notify(
     labeler_mention: mention(labeler, config.mentionMap),
   });
   if (!text.trim() || text.length > 4000)
-    throw new Error("Rendered Slack message must contain 1-4000 characters.");
+    throw new UserError(
+      "Rendered Slack message must contain 1-4000 characters.",
+    );
   const payload = { text };
   if (config.dryRun)
     return { status: "dry-run", label, payload, destinations: webhooks.length };
   const comments = config.dedup ? await ports.comments() : [];
+  const trusted = config.dedup ? await ports.trustedAuthors() : [];
   let posted = 0,
     deduplicated = 0,
     pending = 0;
-  const failures: unknown[] = [];
-  for (const webhook of webhooks) {
+  const failures: string[] = [];
+  for (const [index, webhook] of webhooks.entries()) {
     try {
       const status = await sendOne(
         repository,
@@ -234,19 +248,22 @@ export async function notify(
         payload,
         config.dedup,
         comments,
+        trusted,
         ports,
       );
       if (status === "posted") posted++;
       else if (status === "deduplicated") deduplicated++;
       else pending++;
     } catch (error) {
-      failures.push(error);
+      if (webhooks.length === 1) throw error;
+      failures.push(
+        `destination ${index + 1}: ${error instanceof UserError ? error.message : "unexpected error"}`,
+      );
     }
   }
   if (failures.length) {
-    if (webhooks.length === 1) throw failures[0];
-    throw new Error(
-      `Slack fan-out incomplete: ${posted} posted, ${deduplicated} already sent, ${pending} pending review, ${failures.length} failed. Check destination channels and pending markers before retrying. Successful destinations will be skipped on retry with dedup enabled.`,
+    throw new UserError(
+      `Slack fan-out incomplete: ${posted} posted, ${deduplicated} already sent, ${pending} pending review, ${failures.length} failed (${failures.join("; ")}). Check destination channels and pending markers before retrying. Successful destinations will be skipped on retry with dedup enabled.`,
     );
   }
   return {
@@ -266,6 +283,7 @@ async function sendOne(
   payload: { text: string },
   dedup: boolean,
   comments: Comment[],
+  trusted: string[],
   ports: Ports,
 ) {
   const key = createHash("sha256")
@@ -275,7 +293,7 @@ async function sendOne(
   if (dedup) {
     const prior = comments.find(
       (c) =>
-        ports.trustedAuthors.includes(c.author) &&
+        trusted.includes(c.author) &&
         [marker(key, "pending"), marker(key, "sent")].includes(c.body),
     );
     if (prior)
@@ -291,7 +309,7 @@ async function sendOne(
       try {
         await ports.deleteComment(commentId);
       } catch {
-        throw new Error(
+        throw new UserError(
           "Slack rejected the message; marker cleanup failed. Review the PR marker before retrying.",
         );
       }
@@ -302,7 +320,7 @@ async function sendOne(
     try {
       await ports.updateComment(commentId, marker(key, "sent"));
     } catch {
-      throw new Error(
+      throw new UserError(
         "Slack accepted the message, but the marker update failed. Pending marker retained to prevent a duplicate.",
       );
     }
