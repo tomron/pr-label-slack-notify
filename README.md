@@ -71,7 +71,7 @@ Then use this step with the same event, permissions and concurrency as above:
     dry_run: "false"
 ```
 
-A map entry wins over the default webhook; the fallback is not added to a list. Empty lists are invalid. Duplicate URLs within a list are sent only once. All selected URLs are validated before any delivery. A matching label without either route fails before sending. Exact labels are case-sensitive. Comma/newline lists and JSON arrays are supported; use JSON for a label containing a comma.
+A map entry wins over the default webhook; the fallback is not added to a list. Empty lists are invalid. Duplicate URLs within a list are sent only once. All selected URLs are validated before any delivery. A matching label without either route fails before sending. Exact labels are case-sensitive. Comma/newline lists and JSON arrays are supported; use JSON for a label containing a comma. A list starting with `[` is read as JSON only when it looks like a JSON array (`["`, `[]`, `[true`...), so labels such as `[WIP]` work in plain lists.
 
 Webhook URLs are credentials. Never put them in workflow files, comments or public examples. Slack and GovSlack HTTPS incoming webhook hosts are supported; redirects and arbitrary destinations are rejected.
 
@@ -110,7 +110,7 @@ The template is trusted workflow configuration. Event fields are escaped for Sla
 
 With `dedup: true`, a bot-owned hidden PR comment stores a fixed marker with a SHA-256 key for the repository, PR, label and webhook. Raw webhook URLs are never stored in comments. Markers from other contributors are ignored. Changing a webhook creates a new destination and therefore a new dedup key. Removing and re-adding the same label to the same destination does not post again.
 
-Each destination has its own marker, so retrying a partially successful fan-out skips channels that already received the message. Adding a channel later does not resend to existing channels. Destinations are processed sequentially and independent destinations still run if one fails; any failure makes the action fail with a count summary (never raw URLs). Pending destinations require review. With `dedup: false`, rerunning a partial failure resends to all channels.
+Each destination has its own marker, so retrying a partially successful fan-out skips channels that already received the message. Adding a channel later does not resend to existing channels. Destinations are processed sequentially and independent destinations still run if one fails; any failure makes the action fail with a count summary and a per-destination reason (never raw URLs). Pending destinations require review. With `dedup: false`, rerunning a partial failure resends to all channels.
 
 The marker is `pending` before delivery, then `sent` after Slack confirms `ok`. Hidden means the comment body is an HTML comment, not that it is private: GitHub still records the comment and may show activity. Deleting a marker can allow another notification.
 

@@ -45,7 +45,7 @@ const config: Config = {
 function setup() {
   const stored: Comment[] = [];
   const ports: Ports = {
-    trustedAuthors: ["github-actions[bot]"],
+    trustedAuthors: async () => ["github-actions[bot]"],
     comments: vi.fn(async () => stored),
     createComment: vi.fn(async (body) => {
       stored.push({
@@ -73,6 +73,7 @@ describe("config", () => {
     ["a,b", ["a", "b"]],
     ["a\nb\na", ["a", "b"]],
     ['["a,b","c"]', ["a,b", "c"]],
+    ["[WIP],ready", ["[WIP]", "ready"]],
   ])("parses labels %s", (input, result) =>
     expect(parseLabels(input as string)).toEqual(result),
   );
@@ -120,6 +121,9 @@ describe("config", () => {
     ).toBe("{author} real"));
   it("rejects unknown placeholders", () =>
     expect(() => render("{typo}", {})).toThrow());
+  it.each(["{Label}", "{label2}"])("rejects placeholder %s", (t) =>
+    expect(() => render(t, { label: "x" })).toThrow(/Unknown/),
+  );
 });
 describe("notifications", () => {
   it("renders PR author and labeler separately", async () => {

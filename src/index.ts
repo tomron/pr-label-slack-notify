@@ -7,6 +7,7 @@ import {
   stringMap,
   parseWebhookMap,
   RejectedPost,
+  UserError,
   type LabelEvent,
 } from "./notify.js";
 
@@ -30,30 +31,23 @@ export async function run(): Promise<void> {
     const { owner, repo } = github.context.repo;
     const event = github.context.payload as LabelEvent;
     // Only the workflow bot, or the verified owner of a supplied personal token, can own markers.
-    const trustedAuthors = ["github-actions[bot]"];
-    if (
-      dedup &&
-      !dryRun &&
-      event.action === "labeled" &&
-      event.pull_request &&
-      event.label &&
-      labels.includes(event.label.name) &&
-      ["pull_request", "pull_request_target"].includes(github.context.eventName)
-    ) {
+    const trustedAuthors = async () => {
       if (!token)
-        throw new Error("github_token is required when dedup is enabled.");
+        throw new UserError("github_token is required when dedup is enabled.");
+      const trusted = ["github-actions[bot]"];
       try {
         const user = await octokit.rest.users.getAuthenticated();
-        trustedAuthors.push(user.data.login);
+        trusted.push(user.data.login);
       } catch (error) {
         const status = (error as { status?: number }).status;
         // Installation GITHUB_TOKEN cannot call /user. Its bot identity is fixed.
         if (status !== 403)
-          throw new Error("Unable to verify GitHub token identity.", {
+          throw new UserError("Unable to verify GitHub token identity.", {
             cause: error,
           });
       }
-    }
+      return trusted;
+    };
     const result = await notify(
       github.context.eventName,
       event,
@@ -112,15 +106,15 @@ export async function run(): Promise<void> {
               redirect: "error",
             });
           } catch {
-            throw new Error(
-              "Slack delivery outcome is unknown (network/timeout). Pending marker retained; check Slack before retrying.",
+            throw new UserError(
+              `Slack delivery outcome is unknown (network/timeout).${dedup ? " Pending marker retained;" : ""} Check Slack before retrying.`,
             );
           }
           let body: string;
           try {
             body = (await response.text()).trim();
           } catch {
-            throw new Error(
+            throw new UserError(
               "Slack response was lost. Check Slack before retrying.",
             );
           }
@@ -129,7 +123,7 @@ export async function run(): Promise<void> {
               `Slack rejected the message (HTTP ${response.status}). No automatic retry.`,
             );
           if (!response.ok || body !== "ok")
-            throw new Error(
+            throw new UserError(
               "Unexpected Slack response. Delivery may be uncertain; check Slack before retrying.",
             );
         },
@@ -152,15 +146,9 @@ export async function run(): Promise<void> {
       );
   } catch (error) {
     // Never surface raw SDK/network errors: those may contain authorization headers or webhook URLs.
-    const message =
-      error instanceof Error ? error.message : "Notification failed.";
-    const safe =
-      /^(labels|mention_map|webhook_map|dedup|dry_run|message|Rendered|Unknown message|Invalid Slack|Use an HTTPS|No webhook|Incomplete|PR URL|Slack|Unexpected Slack|github_token|Unable to verify)/.test(
-        message,
-      );
     core.setFailed(
-      safe
-        ? message
+      error instanceof UserError
+        ? error.message
         : "Notification failed. Check GitHub permissions and configuration; details suppressed to protect secrets.",
     );
   }

@@ -7,8 +7,7 @@
     "noUncheckedIndexedAccess": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true,
-    "outDir": "lib"
+    "noEmit": true
   },
   "include": ["src", "test"]
 }
